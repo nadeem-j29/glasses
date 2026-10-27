@@ -17,6 +17,8 @@
   input::placeholder{color:#cfd8ff}
   button:focus,input:focus{outline:none;border-color:#fff;background:#1b2a3a}
   #answer{flex:1;white-space:pre-wrap;overflow:hidden}
+  #mnext{font-size:26px;color:#ffd27a;min-height:0}
+  #mbody{flex:1;white-space:pre-wrap;overflow:hidden;font-size:20px}
   #q{font-size:18px;color:#9fd3ff;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
@@ -24,9 +26,16 @@
 <section id="home" class="screen">
   <h1>Claude</h1>
   <div id="status" class="status"></div>
+  <button class="focusable" id="meetingBtn">Meeting copilot</button>
   <button class="focusable" data-preset="next">Next up</button>
   <button class="focusable" data-preset="todo">To do, top 3</button>
   <input class="focusable" id="ask" type="text" placeholder="Ask anything…" aria-label="Ask Claude">
+</section>
+<section id="meeting" class="screen hidden">
+  <div id="mstatus" class="status"></div>
+  <div id="mnext"></div>
+  <div id="mbody"></div>
+  <button class="focusable" id="flag">★ Flag this moment</button>
 </section>
 <section id="result" class="screen hidden">
   <div id="q"></div>
@@ -52,7 +61,7 @@
   $('status').textContent = cfg.t ? 'Read-only. Answers take 5 to 60 s.' : 'Setup needed: open the install link with the token.';
 
   const focusables = () => Array.from(document.querySelectorAll('.focusable')).filter((el) => el.offsetParent !== null);
-  const show = (id) => { $('home').classList.toggle('hidden', id !== 'home'); $('result').classList.toggle('hidden', id !== 'result'); };
+  const show = (id) => ['home', 'result', 'meeting'].forEach((s) => $(s).classList.toggle('hidden', s !== id));
   let last = null, timer = null, ctrl = null;
 
   async function ask(q, label, from) {
@@ -105,7 +114,41 @@
     u.onerror = () => {};
     speechSynthesis.speak(u);
   });
+  // Meeting copilot: the phone or laptop records; the lens shows the newest card from the Mac.
+  let mtimer = null, mlast = '';
+  const api = (path, opt) => fetch(`${cfg.api}/t/${cfg.t}${path}`, Object.assign({ headers: { 'ngrok-skip-browser-warning': '1' } }, opt || {}));
+  function render(card) {
+    const txt = (card.text || '').replace(/\*\*/g, '').replace(/^#+\s*/gm, '');
+    const m = txt.match(/Ask next:?\s*(.+)/i);
+    $('mnext').textContent = m ? '→ ' + m[1].replace(/^["“]|["”]$/g, '') : '';
+    $('mbody').textContent = (m ? txt.replace(m[0], '') : txt).replace(/\n{2,}/g, '\n').trim();
+  }
+  async function poll() {
+    try {
+      const r = await api('/meeting');
+      const st = await r.json();
+      if (!r.ok) throw new Error(st.error || `Bridge error ${r.status}`);
+      $('mstatus').textContent = (st.recording ? `● Recording since ${st.since}` : 'Not recording. Start it on the phone or laptop.') + (st.busy ? ' · thinking' : '');
+      const key = st.card ? st.card.t + st.card.text : '';
+      if (st.card && key !== mlast) { mlast = key; render(st.card); }
+      if (!st.card) { $('mnext').textContent = ''; $('mbody').textContent = 'No cards yet.'; }
+    } catch (e) {
+      $('mstatus').textContent = e instanceof TypeError ? 'Could not reach the Mac bridge.' : e.message;
+    }
+  }
+  $('meetingBtn').addEventListener('click', () => {
+    last = $('meetingBtn');
+    if (!cfg.t) { $('status').textContent = 'Setup needed: open the install link with the token.'; return; }
+    show('meeting'); history.pushState({ screen: 'meeting' }, '');
+    mlast = ''; $('mbody').textContent = 'Loading…'; poll();
+    clearInterval(mtimer); mtimer = setInterval(poll, 4000);
+    $('flag').focus();
+  });
+  $('flag').addEventListener('click', async () => {
+    try { await api('/meeting', { method: 'POST' }); $('mstatus').textContent = '★ Flagged'; } catch (e) { $('mstatus').textContent = 'Flag failed.'; }
+  });
   window.addEventListener('popstate', () => {
+    clearInterval(mtimer);
     if (ctrl) { ctrl.abort(); ctrl = null; }
     clearInterval(timer);
     if ('speechSynthesis' in window) speechSynthesis.cancel();
@@ -118,7 +161,7 @@
     if (e.key === 'ArrowDown' || e.key === 'ArrowRight') { e.preventDefault(); list[(i + 1) % list.length].focus(); }
     else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') { e.preventDefault(); list[(i - 1 + list.length) % list.length].focus(); }
     else if (e.key === 'Enter' && document.activeElement && document.activeElement.tagName === 'BUTTON') { e.preventDefault(); document.activeElement.click(); }
-    else if ((e.key === 'Escape' || e.key === 'Backspace') && !$('result').classList.contains('hidden')) { e.preventDefault(); history.back(); }
+    else if ((e.key === 'Escape' || e.key === 'Backspace') && $('home').classList.contains('hidden')) { e.preventDefault(); history.back(); }
   });
   focusables()[0].focus();
 })();
